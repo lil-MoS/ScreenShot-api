@@ -1,0 +1,98 @@
+name: Screenshot Capture Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Website URL to capture'
+        required: true
+        type: string
+      user_id:
+        description: 'User identifier for the request'
+        required: true
+        type: string
+  repository_dispatch:
+    types: [screenshot_request]
+
+jobs:
+  capture-screenshot:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      
+      - name: Set up unique identifiers
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "URL=${{ github.event.inputs.url }}" >> $GITHUB_ENV
+            echo "USER_ID=${{ github.event.inputs.user_id }}" >> $GITHUB_ENV
+          else
+            echo "URL=${{ github.event.client_payload.url }}" >> $GITHUB_ENV
+            echo "USER_ID=${{ github.event.client_payload.user_id }}" >> $GITHUB_ENV
+          fi
+          echo "TIMESTAMP=$(date +%s)" >> $GITHUB_ENV
+          echo "UNIQUE_ID=$(uuidgen | cut -d'-' -f1)" >> $GITHUB_ENV
+          echo "REQUEST_ID=${UNIQUE_ID}_${TIMESTAMP}_${USER_ID}" >> $GITHUB_ENV
+      
+      - name: Create downloads directory
+        run: mkdir -p downloads
+      
+      - name: Capture screenshot
+        id: capture
+        run: |
+          # Encode URL properly
+          ENCODED_URL=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${{ env.URL }}', safe=''))")
+          
+          # Generate filename with unique identifier
+          FILENAME="screenshot_${{ env.REQUEST_ID }}.png"
+          FILEPATH="downloads/${FILENAME}"
+          
+          # Call ScreenshotMachine API
+          curl -s -o "${FILEPATH}" "https://api.screenshotmachine.com/?key=dd29ad&url=${ENCODED_URL}&dimension=1024x1024"
+          
+          # Verify file was created
+          if [ -f "${FILEPATH}" ]; then
+            echo "Screenshot captured successfully: ${FILENAME}"
+            echo "filename=${FILENAME}" >> $GITHUB_OUTPUT
+            echo "filepath=${FILEPATH}" >> $GITHUB_OUTPUT
+            echo "filesize=$(stat -c%s ${FILEPATH})" >> $GITHUB_OUTPUT
+          else
+            echo "Failed to capture screenshot"
+            exit 1
+          fi
+      
+      - name: Commit and push screenshot
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add downloads/${{ steps.capture.outputs.filename }}
+          git commit -m "Add screenshot for request ${{ env.REQUEST_ID }}"
+          git push
+      
+      - name: Create metadata file
+        run: |
+          cat > downloads/${{ env.REQUEST_ID }}.json << EOF
+          {
+            "request_id": "${{ env.REQUEST_ID }}",
+            "user_id": "${{ env.USER_ID }}",
+            "url": "${{ env.URL }}",
+            "filename": "${{ steps.capture.outputs.filename }}",
+            "filesize": "${{ steps.capture.outputs.filesize }}",
+            "timestamp": "${{ env.TIMESTAMP }}",
+            "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          
+          git add downloads/${{ env.REQUEST_ID }}.json
+          git commit -m "Add metadata for request ${{ env.REQUEST_ID }}"
+          git push
+      
+      - name: Output result
+        run: |
+          echo "Request ID: ${{ env.REQUEST_ID }}"
+          echo "Screenshot saved as: ${{ steps.capture.outputs.filename }}"
+          echo "File path in repo: ${{ steps.capture.outputs.filepath }}"
